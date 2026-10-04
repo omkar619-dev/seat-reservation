@@ -1,0 +1,36 @@
+# Local stack: `docker compose up --build` runs exactly the image we deploy.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: seats
+      POSTGRES_PASSWORD: seats
+      POSTGRES_DB: seats
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    ports:
+      - "${PG_PORT:-55432}:5432" # 55432 on the host so it never clashes with a local Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seats -d seats"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://seats:seats@postgres:5432/seats?sslmode=disable
+      APP_ENV: development
+      JWT_SECRET: local-dev-jwt-secret
+      ADMIN_KEY: dev-admin-key
+      LOG_LEVEL: info
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
