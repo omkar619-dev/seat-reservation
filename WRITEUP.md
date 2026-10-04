@@ -251,7 +251,7 @@ seat twice.
 - One Postgres primary is the only decision-maker. No cache, replica or in-memory state can say
   yes. The in-process show cache holds only immutable metadata (price, limit, label to seat id),
   never availability.
-- App-to-DB partition: `/readyz` returns 503 (ping through the 2-connection ops pool, 2 s timeout),
+- App-to-DB partition: `/readyz` returns 503 (ping through the 3-connection ops pool, 2 s timeout),
   and reserve and cancel return 503 `unavailable` with `Retry-After: 1` on connection errors,
   Postgres connection-exception and insufficient-resources errors, lock or statement timeouts, or
   the 30 s request deadline. Session settings make a stuck connection fail fast: `lock_timeout`
@@ -279,14 +279,17 @@ seat twice.
   see zeros, not gaps), `reservations_cancelled_total`, `reservation_seats_released_total`.
 - State: `seats_available`, `seats_held`, `seats_confirmed`, `seats_total`, `seats_reconciled`
   `{show_id,show_name}`, read from Postgres at scrape time for the last 50 shows through a
-  separate 2-connection pool, so they always agree with `GET /shows/{id}` and a saturated main
-  pool cannot stall a scrape; `seat_metrics_scrape_success`.
+  separate 3-connection ops pool, so they always agree with `GET /shows/{id}` and a saturated
+  main pool cannot stall a scrape; `seat_metrics_scrape_success`; `db_up` (a dedicated ping on
+  every scrape, so losing the database after boot is visible, which `app_ready` alone is not).
 - HTTP: `http_requests_total{method,route,code}` (route is the mux pattern, so no per-id
   cardinality), `http_request_duration_seconds{method,route}`, `http_requests_in_flight`,
   `http_panics_total`.
 - Database: `db_pool_*` (max/total/acquired/idle connections, acquires, acquire time, canceled
   acquires, and `db_pool_empty_acquires_total`: acquires that had to wait, i.e. saturation) and
   `db_tx_retries_total{sqlstate}`.
+- Integrity: `show_audit_ok{show_id,show_name}` and `show_audit_last_run_timestamp_seconds` from
+  the scheduled auditor (below).
 - Safety and ops: `auth_spoof_attempts_total`, `reconciliation_failures_total`,
   `log_stdout_lines_dropped_total`, `app_ready`, `app_info{version}`, Go and process collectors.
 
@@ -319,10 +322,12 @@ transaction, so the report is exact even mid-burst. A failure increments
 | `confirmed_reservations_cover_taken_seats` | seats across confirmed reservations = taken seat rows |
 | `revenue_matches_price` | sum of `amount_paise` = taken seats x price |
 
-The audit runs on demand today: the burst and every concurrency test call it; nothing runs it on
-a schedule. `seats_reconciled` is cheap but weak (each seat row has exactly one status, so it can
-only fail if seat rows appear or vanish). A real integrity signal needs the scheduled auditor in
-section 7.
+A scheduled auditor re-runs the same 8 checks every 30 s (`AUDIT_INTERVAL`) for the 5 most recent
+shows (`AUDIT_SHOWS`) on the ops pool, and exports `show_audit_ok{show_id}`; a failure also
+increments `reconciliation_failures_total` and logs `RECONCILIATION FAILED`. Each audit is one
+REPEATABLE READ snapshot, so it is exact even mid-burst. `seats_reconciled` is cheap but weak (each
+seat row has exactly one status, so it only fails if seat rows appear or vanish); `show_audit_ok`
+is the real integrity signal.
 
 **Health and lifecycle.** `/healthz` is liveness and never touches the database, so a database
 outage doesn't get healthy containers restarted. `/readyz` is readiness: 200 only when migrated,
@@ -336,14 +341,16 @@ drains in-flight requests for up to 30 s (`railway.json` allows 40 s).
 
 | Page on | Because |
 |---|---|
-| `reconciliation_failures_total` increases, or `seats_reconciled == 0` | data integrity, possibly oversold: page immediately, even at zero traffic |
+| `show_audit_ok == 0`, or `reconciliation_failures_total` increases | data integrity, possibly oversold: page immediately, even at zero traffic |
 | any 500 on reserve or cancel, or a sustained 503 rate | a bug on the money path, or the database unreachable or saturated (failing closed = lost sales) |
 | `db_tx_retries_total{sqlstate="40P01"}` increases | a deadlock means the lock-order invariant is broken |
-| `app_ready == 0` or `/readyz` failing for over a minute, or the scrape failing | nothing can be sold |
+| `db_up == 0` or `/readyz` failing for over a minute | nothing can be sold (we fail closed) |
 | reserve p99 above 2 s, sustained, while `db_pool_empty_acquires_total` keeps rising | saturation: clients time out and retry, adding load |
 
 Ticket, not page: a spike in `auth_spoof_attempts_total` (someone probing; identity is safe either
-way) and `log_stdout_lines_dropped_total` (expected during bursts). Never page on 409s: in an
+way), `log_stdout_lines_dropped_total` (expected during bursts), and a stale
+`show_audit_last_run_timestamp_seconds` outside an on-sale (during one, the integrity signal going
+blind is a page). Never page on 409s: in an
 on-sale `seat_taken` can be 95% or more of reserve traffic (about 96% in the burst in the README),
 and that is the system working. Pool waits alone are not a page either: during a burst nearly
 every acquire waits, because the 40-connection pool is the intended queue in front of Postgres.
@@ -372,9 +379,8 @@ every acquire waits, because the 40-connection pool is the intended queue in fro
 
 1. **Timed holds with a payment confirm step**, as designed in section 3, with the audit checks
    extended for `held`.
-2. **Continuous auditor and alerting in the repo:** run the 8 checks on a schedule for shows on
-   sale, export them as gauges, and commit the alert rules from section 5 plus a Grafana
-   dashboard JSON.
+2. **Alerting in the repo:** commit the section 5 pages as Prometheus alert rules plus a Grafana
+   dashboard JSON, and have the auditor cover every show on sale (today: the 5 newest).
 3. **HTTP-layer tests.** The store has real-Postgres concurrency tests; handlers, status mapping
    and auth are covered only end to end by the burst.
 4. **Multiple replicas:** nothing in the decision path is per-process, and the show cache is safe

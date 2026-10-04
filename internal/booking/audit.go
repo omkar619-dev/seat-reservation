@@ -186,3 +186,21 @@ func RecentShowCounts(ctx context.Context, q Querier, limit int) ([]ShowCounts, 
 		return c, err
 	})
 }
+
+// ShowRef identifies a show for background jobs.
+type ShowRef struct {
+	ID   string
+	Name string
+}
+
+// RecentShows lists the most recently created shows (the ones most likely to be on sale).
+func RecentShows(ctx context.Context, q Querier, limit int) ([]ShowRef, error) {
+	rows, err := q.Query(ctx, `SELECT id::text, name FROM shows ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (ShowRef, error) {
+		var s ShowRef
+		return s, row.Scan(&s.ID, &s.Name)
+	})
+}

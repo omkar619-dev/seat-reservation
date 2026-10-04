@@ -169,7 +169,9 @@ curl -s $BASE/shows/<show_id>/audit          # 8 cross-table invariants from one
 - **Metrics:** `GET /metrics`, Prometheus text format, no auth. No Prometheus server is bundled:
   point one at it or read it with curl. Seat gauges
   (`seats_available/held/confirmed/total/reconciled{show_id,show_name}`) are read from Postgres
-  on every scrape for the 50 most recent shows; counters are per process. The full list and the
+  on every scrape for the 50 most recent shows; counters are per process. `db_up` pings Postgres
+  on every scrape, and `show_audit_ok{show_id}` is the result of the scheduled audit (every 30 s,
+  5 newest shows): the two signals worth paging on. The full list and the
   alerting rules are in [WRITEUP.md section 5](WRITEUP.md#5-observability).
 - **Logs:** one JSON line per request. Send `X-Request-ID` (8-128 characters of
   `[A-Za-z0-9._:-]`) to correlate; it is echoed back and logged, otherwise one is generated. The
@@ -329,7 +331,9 @@ All settings are environment variables.
 | `APP_ENV` | `production` in the image, `development` in compose | in production `JWT_SECRET` (32+ chars) and `ADMIN_KEY` (16+ chars) are required; otherwise dev defaults apply |
 | `JWT_SECRET`, `ADMIN_KEY` | dev-only defaults outside production | token signing key; key for minting admin tokens |
 | `TOKEN_TTL` | `24h` | |
-| `DB_MAX_CONNS` | `40` | main pool (2-500). A separate 2-connection pool serves `/readyz` and the seat gauges |
+| `DB_MAX_CONNS` | `40` | main pool (2-500). A separate 3-connection ops pool serves `/readyz`, the seat gauges and the auditor |
+| `AUDIT_INTERVAL` | `30s` | scheduled reconciliation of the newest shows; `0` disables it |
+| `AUDIT_SHOWS` | `5` | how many of the newest shows the auditor checks |
 | `RESERVE_PRECHECK` | `true` | read-only fast path; `false` sends every request through the transaction |
 | `REQUEST_TIMEOUT` | `30s` | per business request, and the shutdown drain limit |
 | `SHUTDOWN_DELAY` | `3s` | time between failing readiness and draining on SIGTERM |

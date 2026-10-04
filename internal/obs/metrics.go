@@ -30,6 +30,8 @@ type Metrics struct {
 	TxRetries             *prometheus.CounterVec
 	SpoofAttempts         prometheus.Counter
 	ReconcileFailures     prometheus.Counter
+	ShowAuditOK           *prometheus.GaugeVec
+	AuditLastRun          prometheus.Gauge
 	HTTPRequests          *prometheus.CounterVec
 	HTTPDuration          *prometheus.HistogramVec
 	InFlight              prometheus.Gauge
@@ -77,7 +79,15 @@ func NewMetrics(version string) *Metrics {
 		}),
 		ReconcileFailures: f.NewCounter(prometheus.CounterOpts{
 			Name: "reconciliation_failures_total",
-			Help: "Audits (GET /shows/{id}/audit) that found an invariant violation. Page on any increase.",
+			Help: "Audits (scheduled or GET /shows/{id}/audit) that found an invariant violation. Page on any increase.",
+		}),
+		ShowAuditOK: f.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "show_audit_ok",
+			Help: "1 if the scheduled audit of the show passed every cross-table check, 0 if any failed. Page on 0.",
+		}, []string{"show_id", "show_name"}),
+		AuditLastRun: f.NewGauge(prometheus.GaugeOpts{
+			Name: "show_audit_last_run_timestamp_seconds",
+			Help: "Unix time the scheduled auditor last completed a cycle. Alert if it stops advancing.",
 		}),
 		HTTPRequests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "http_requests_total",
@@ -180,7 +190,7 @@ type seatCollector struct {
 	pool                                          *pgxpool.Pool
 	log                                           *slog.Logger
 	available, held, confirmed, total, reconciled *prometheus.Desc
-	scrapeOK                                      *prometheus.Desc
+	scrapeOK, dbUp                                *prometheus.Desc
 }
 
 const seatMetricShows = 50
@@ -196,11 +206,12 @@ func newSeatCollector(p *pgxpool.Pool, log *slog.Logger) *seatCollector {
 		total:      prometheus.NewDesc("seats_total", "Total seats, per show.", labels, nil),
 		reconciled: prometheus.NewDesc("seats_reconciled", "1 if available + held + confirmed == total_seats for the show.", labels, nil),
 		scrapeOK:   prometheus.NewDesc("seat_metrics_scrape_success", "1 if seat gauges were read from the database on this scrape.", nil, nil),
+		dbUp:       prometheus.NewDesc("db_up", "1 if Postgres answered a ping during this scrape (ops pool, 2s timeout). Page if 0 for 1m.", nil, nil),
 	}
 }
 
 func (c *seatCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{c.available, c.held, c.confirmed, c.total, c.reconciled, c.scrapeOK} {
+	for _, d := range []*prometheus.Desc{c.available, c.held, c.confirmed, c.total, c.reconciled, c.scrapeOK, c.dbUp} {
 		ch <- d
 	}
 }
@@ -208,6 +219,14 @@ func (c *seatCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *seatCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	// A dedicated ping, so db_up means "reachable", not "the seat query was slow".
+	if err := c.pool.Ping(ctx); err != nil {
+		c.log.Warn("metrics: database ping failed", slog.String("error", err.Error()))
+		ch <- prometheus.MustNewConstMetric(c.dbUp, prometheus.GaugeValue, 0)
+		ch <- prometheus.MustNewConstMetric(c.scrapeOK, prometheus.GaugeValue, 0)
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(c.dbUp, prometheus.GaugeValue, 1)
 	counts, err := booking.RecentShowCounts(ctx, c.pool, seatMetricShows)
 	ok := 1.0
 	if err != nil {

@@ -26,6 +26,8 @@ type Config struct {
 	LogLevel       slog.Level
 	RequestTimeout time.Duration
 	ShutdownDelay  time.Duration
+	AuditInterval  time.Duration
+	AuditShows     int
 	Production     bool
 }
 
@@ -47,6 +49,8 @@ func Load() (Config, error) {
 	c.LogStdoutRate = envInt("LOG_STDOUT_RATE", 400, &errs) // lines/s; Railway drops above 500/s. 0 = unlimited
 	c.RequestTimeout = envDuration("REQUEST_TIMEOUT", 30*time.Second, &errs)
 	c.ShutdownDelay = envDuration("SHUTDOWN_DELAY", 3*time.Second, &errs)
+	c.AuditInterval = envDuration("AUDIT_INTERVAL", 30*time.Second, &errs) // 0 disables the scheduled auditor
+	c.AuditShows = envInt("AUDIT_SHOWS", 5, &errs)
 	if err := c.LogLevel.UnmarshalText([]byte(env("LOG_LEVEL", "info"))); err != nil {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: %w", err))
 	}

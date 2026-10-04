@@ -66,7 +66,9 @@ func run() error {
 		return err
 	}
 	defer mainPool.Close()
-	opsPool, err := db.NewPool(ctx, cfg.DatabaseURL, 2, "seat-reservation-ops")
+	// Small separate pool for readiness, metric scrapes and the auditor: request traffic can
+	// saturate the main pool without making the service look dead or blinding its metrics.
+	opsPool, err := db.NewPool(ctx, cfg.DatabaseURL, 3, "seat-reservation-ops")
 	if err != nil {
 		return err
 	}
@@ -102,6 +104,8 @@ func run() error {
 	}
 
 	go initDatabase(ctx, mainPool, logger, ready, metrics)
+	go runAuditor(ctx, booking.NewStore(opsPool, booking.Options{}), opsPool, metrics, logger, ready,
+		cfg.AuditInterval, cfg.AuditShows)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -160,6 +164,57 @@ func initDatabase(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, 
 		}
 		backoff = min(backoff*2, 10*time.Second)
 	}
+}
+
+// runAuditor re-runs the cross-table reconciliation (the same checks as GET /shows/{id}/audit)
+// for the most recent shows on a schedule and exports show_audit_ok, so an integrity
+// violation pages someone instead of waiting for a human to ask. It runs on the ops pool, in
+// a REPEATABLE READ snapshot per show, so it is exact even mid-burst.
+func runAuditor(ctx context.Context, store *booking.Store, pool *pgxpool.Pool, metrics *obs.Metrics,
+	logger *slog.Logger, ready *httpapi.Readiness, interval time.Duration, shows int) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !ready.Initialized() {
+			continue
+		}
+		auditOnce(ctx, store, pool, metrics, logger, shows)
+	}
+}
+
+func auditOnce(ctx context.Context, store *booking.Store, pool *pgxpool.Pool, metrics *obs.Metrics,
+	logger *slog.Logger, shows int) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	recent, err := booking.RecentShows(ctx, pool, shows)
+	if err != nil {
+		logger.Warn("auditor: listing shows failed", slog.String("error", err.Error()))
+		return
+	}
+	metrics.ShowAuditOK.Reset() // only export shows still in the window
+	for _, sh := range recent {
+		rep, err := store.Audit(ctx, sh.ID)
+		if err != nil {
+			logger.Warn("auditor: audit did not run", slog.String("show_id", sh.ID), slog.String("error", err.Error()))
+			continue
+		}
+		ok := 1.0
+		if !rep.OK {
+			ok = 0
+			metrics.ReconcileFailures.Inc()
+			logger.Error("RECONCILIATION FAILED", slog.String("show_id", sh.ID), slog.Any("checks", rep.Checks))
+		}
+		metrics.ShowAuditOK.WithLabelValues(sh.ID, sh.Name).Set(ok)
+	}
+	metrics.AuditLastRun.SetToCurrentTime()
 }
 
 func healthcheck() int {
