@@ -107,7 +107,10 @@ func NewMetrics(version string) *Metrics {
 		ConstLabels: prometheus.Labels{"version": version},
 	}).Set(1)
 
-	// Create every decline series up front so dashboards and alerts see explicit zeros.
+	// Create series up front so dashboards and alerts see explicit zeros, not gaps.
+	for _, code := range []string{"40P01", "40001", "55P03"} {
+		m.TxRetries.WithLabelValues(code)
+	}
 	for _, reason := range []booking.DeclineReason{booking.ReasonSeatTaken, booking.ReasonPerUserLimit,
 		booking.ReasonIdempotentReplay, booking.ReasonIdempotencyReuse} {
 		for _, stage := range []booking.Stage{booking.StagePrecheck, booking.StageAtomic} {

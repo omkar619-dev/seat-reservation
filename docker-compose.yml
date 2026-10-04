@@ -25,6 +25,7 @@ services:
       JWT_SECRET: local-dev-jwt-secret
       ADMIN_KEY: dev-admin-key
       LOG_LEVEL: info
+      RESERVE_PRECHECK: ${RESERVE_PRECHECK:-true} # false = every request goes through the transaction
     ports:
       - "${APP_PORT:-8080}:8080"
     depends_on:
