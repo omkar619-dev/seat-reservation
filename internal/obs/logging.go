@@ -5,9 +5,12 @@ package obs
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // NewLogger returns a JSON logger. slog's JSON handler emits each record with exactly one
@@ -115,4 +118,54 @@ func Annotations(ctx context.Context) []slog.Attr {
 		return append([]slog.Attr(nil), rl.attrs...)
 	}
 	return nil
+}
+
+// RateLimitedWriter passes at most `perSec` lines per second to w (a token bucket), except
+// WARN and ERROR lines, which always pass. Railway drops anything above 500 lines/s per
+// replica; limiting here makes the sampling explicit, guarantees errors are never the lines
+// that get dropped, and reports how many were dropped. The full stream still reaches the
+// in-memory /logs tail, and every outcome is counted exactly in /metrics.
+type RateLimitedWriter struct {
+	w      io.Writer
+	perSec float64
+
+	mu         sync.Mutex
+	tokens     float64
+	last       time.Time
+	pending    int64 // dropped since the last report line
+	lastReport time.Time
+	dropped    atomic.Int64
+}
+
+func NewRateLimitedWriter(w io.Writer, perSec int) *RateLimitedWriter {
+	return &RateLimitedWriter{w: w, perSec: float64(perSec), tokens: float64(perSec), last: time.Now()}
+}
+
+// Dropped is the total number of lines withheld from w.
+func (l *RateLimitedWriter) Dropped() int64 { return l.dropped.Load() }
+
+func (l *RateLimitedWriter) Write(p []byte) (int, error) {
+	if l.perSec <= 0 {
+		return l.w.Write(p)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.tokens = min(l.perSec, l.tokens+now.Sub(l.last).Seconds()*l.perSec)
+	l.last = now
+	if l.pending > 0 && now.Sub(l.lastReport) >= time.Second {
+		fmt.Fprintf(l.w, `{"time":%q,"level":"WARN","msg":"stdout log rate limit reached; lines dropped here are still in GET /logs and counted in /metrics","dropped":%d,"limit_per_sec":%g}`+"\n",
+			now.UTC().Format(time.RFC3339Nano), l.pending, l.perSec)
+		l.pending, l.lastReport = 0, now
+	}
+	important := bytes.Contains(p, []byte(`"level":"ERROR"`)) || bytes.Contains(p, []byte(`"level":"WARN"`))
+	if !important {
+		if l.tokens < 1 {
+			l.pending++
+			l.dropped.Add(1)
+			return len(p), nil
+		}
+		l.tokens--
+	}
+	return l.w.Write(p)
 }

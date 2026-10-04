@@ -22,6 +22,7 @@ type Config struct {
 	Precheck       bool
 	PublicLogs     bool
 	LogBufferLines int
+	LogStdoutRate  int
 	LogLevel       slog.Level
 	RequestTimeout time.Duration
 	ShutdownDelay  time.Duration
@@ -42,7 +43,8 @@ func Load() (Config, error) {
 	c.TokenTTL = envDuration("TOKEN_TTL", 24*time.Hour, &errs)
 	c.Precheck = envBool("RESERVE_PRECHECK", true, &errs)
 	c.PublicLogs = envBool("PUBLIC_LOGS", true, &errs)
-	c.LogBufferLines = envInt("LOG_BUFFER_LINES", 5000, &errs)
+	c.LogBufferLines = envInt("LOG_BUFFER_LINES", 20000, &errs)
+	c.LogStdoutRate = envInt("LOG_STDOUT_RATE", 400, &errs) // lines/s; Railway drops above 500/s. 0 = unlimited
 	c.RequestTimeout = envDuration("REQUEST_TIMEOUT", 30*time.Second, &errs)
 	c.ShutdownDelay = envDuration("SHUTDOWN_DELAY", 3*time.Second, &errs)
 	if err := c.LogLevel.UnmarshalText([]byte(env("LOG_LEVEL", "info"))); err != nil {

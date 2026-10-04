@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/omkar619-dev/seat-reservation/internal/auth"
 	"github.com/omkar619-dev/seat-reservation/internal/booking"
@@ -45,10 +46,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Every line goes to the in-memory tail (GET /logs); stdout is rate limited so the
+	// platform's log pipeline samples predictably instead of dropping lines at random.
 	logs := obs.NewRingBuffer(cfg.LogBufferLines)
-	logger := obs.NewLogger(io.MultiWriter(os.Stdout, logs), cfg.LogLevel)
+	stdout := obs.NewRateLimitedWriter(os.Stdout, cfg.LogStdoutRate)
+	logger := obs.NewLogger(io.MultiWriter(logs, stdout), cfg.LogLevel)
 	slog.SetDefault(logger)
 	metrics := obs.NewMetrics(version)
+	metrics.Registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name: "log_stdout_lines_dropped_total",
+		Help: "Info/debug log lines withheld from stdout by the rate limit (still in GET /logs).",
+	}, func() float64 { return float64(stdout.Dropped()) }))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
