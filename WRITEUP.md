@@ -367,6 +367,10 @@ Caddy. Burst runs against it from a laptop in India, every check passing:
 | 1,000 | 1,043 req/s | 0.90 s | 1.99 s | 3.47 s | 0 |
 | 3,000 | 572 req/s | 4.79 s | 9.57 s | 13.8 s | 0 |
 
+Warm 1,000-connection runs vary between 978 and 1,043 req/s (p99 2.0-3.2 s); the first run after a
+reboot is about half as fast. Client-side outliers of 20-30 s happen but are not the app: its own
+histogram shows all 60,102 reserve requests of those runs finished within 5 s inside the process.
+
 - **The bottleneck is TLS, not the database.** `docker stats` during a 3,000-connection run:
   Caddy (TLS termination and proxying) used 110-124% of the 200% CPU budget, the app 20-30%,
   Postgres 15-40%. 98% of `seat_taken` declines were answered by the read-only precheck, and

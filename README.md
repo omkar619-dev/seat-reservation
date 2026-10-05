@@ -119,8 +119,13 @@ t3.micro), every check passing:
 | 3,000 | 20,000 | 572 req/s | 4.79 s | 7.88 s | 9.57 s | 13.8 s | 0 |
 
 At 3,000 connections the box is CPU-bound on TLS termination in Caddy, not on the app or Postgres
-([WRITEUP.md section 5](WRITEUP.md#what-the-live-box-showed)). Locally (Docker on a MacBook, client
-on the same machine) the same burst runs at 19-22k req/s with p99 under 200 ms.
+([WRITEUP.md section 5](WRITEUP.md#what-the-live-box-showed)). Run to run, three warm 1,000-connection
+runs gave 978-1,043 req/s and p99 2.0-3.2 s; the first run after a reboot was about half as fast
+(cold caches). Rare single requests took 20-30 s end to end, but the app's own
+`http_request_duration_seconds` shows every reserve request (60,102 across those runs) finished
+within 5 s inside the app, so that time was spent in the proxy or on the network path (the shape
+matches TCP retransmit backoff). Locally (Docker on a MacBook, client on the same machine) the same
+burst runs at 19-22k req/s with p99 under 200 ms.
 
 Sample output, trimmed, from the live 1,000-connection run:
 
