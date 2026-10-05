@@ -25,8 +25,11 @@ sudo systemctl restart docker
 
 # 1 GiB of RAM is tight for Postgres + app + proxy: swap is the safety net against OOM kills,
 # and a low swappiness keeps it a last resort rather than a performance tax.
-if ! sudo swapon --show | grep -q /swapfile; then
-  sudo fallocate -l 1G /swapfile
+SWAP_SIZE=2G
+if [ "$(sudo swapon --show=NAME,SIZE --noheadings | awk '$1=="/swapfile"{print $2}')" != "$SWAP_SIZE" ]; then
+  sudo swapoff /swapfile 2>/dev/null || true
+  sudo rm -f /swapfile
+  sudo fallocate -l "$SWAP_SIZE" /swapfile
   sudo chmod 600 /swapfile
   sudo mkswap /swapfile >/dev/null
   sudo swapon /swapfile

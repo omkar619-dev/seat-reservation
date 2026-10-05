@@ -25,6 +25,8 @@ services:
       - maintenance_work_mem=32MB
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # If memory runs out, the kernel must kill anything but the database.
+    oom_score_adj: -900
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U seats -d seats"]
       interval: 2s
@@ -53,6 +55,9 @@ services:
       - "443:443"
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?set by deploy.sh}
+      # Each TLS connection costs memory; with thousands open during a burst, a soft heap
+      # target makes Caddy collect garbage harder instead of growing into swap.
+      GOMEMLIMIT: 200MiB
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data # certificates survive restarts (no re-issuing on every deploy)
