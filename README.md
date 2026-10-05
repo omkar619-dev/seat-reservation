@@ -128,47 +128,47 @@ within 5 s inside the app, so that time was spent in the proxy or on the network
 matches TCP retransmit backoff). Locally (Docker on a MacBook, client on the same machine) the same
 burst runs at 19-22k req/s with p99 under 200 ms.
 
-Sample output, trimmed, from the live 1,000-connection run:
+Sample output, trimmed, from a warm live 1,000-connection run of the deployed version (`1786d0e`):
 
 ```text
-== seat-reservation burst 5c9fb21d -> https://16-4-27-248.sslip.io
-ready after 46ms
-show 01a10a76-39d4-7ac5-b987-dd8c8a867da7: 1000 seats (20 rows x 50), limit 4, hot seats [A26 A25 A27 A24 A28]
+== seat-reservation burst c2127b1b -> https://16-4-27-248.sslip.io (seed 1791183465308652000)
+ready after 54ms
+show 01a10ada-abac-7813-bb23-20e700ebbabf: 1000 seats (20 rows x 50), limit 4, hot seats [A26 A25 A27 A24 A28]
 minted 5000 user tokens
 stampede: 20000 requests, 1000 concurrent, 5000 users ...
-stampede done in 19.171s (1043 req/s); latency p50 897ms p95 1.341s p99 1.988s max 3.471s
+stampede done in 19.637s (1018 req/s); latency p50 879ms p95 1.698s p99 2.365s max 6.745s
 
 outcomes (stampede + probes)
-  201 confirmed (new)              734
-  201 idempotent replay            140
+  201 confirmed (new)              730
+  201 idempotent replay            126
   409 idempotency_key_reused         10
   409 per_user_limit                  6
-  409 seat_taken                  19144
+  409 seat_taken                  19162
   5xx                                0
   no response (transport)            0
 
 checks
   [PASS] no seat sold twice
-         0 seats appeared in two different reservations across 857 confirmed responses
+         0 seats appeared in two different reservations across 839 confirmed responses
   [PASS] zero 5xx
          0 5xx responses across the stampede
   [PASS] zero transport errors (after same-key retries)
          0 requests never got a response
   [PASS] hot seats: exactly one winner each, everyone else 409
-         A26: 1993 attempts, 1 winner, 0 non-409; A25: 1979 attempts, 1 winner, 0 non-409; A27: 2022 attempts, 1 winner, 0 non-409; A24: 2021 attempts, 1 winner, 0 non-409; A28: 1998 attempts, 1 winner, 0 non-409
+         A26: 1987 attempts, 1 winner, 0 non-409; A25: 1986 attempts, 1 winner, 0 non-409; A27: 1998 attempts, 1 winner, 0 non-409; A24: 2015 attempts, 1 winner, 0 non-409; A28: 2000 attempts, 1 winner, 0 non-409
   [PASS] idempotent retries move nothing extra
-         1907 keys sent more than once (concurrently or later); 0 keys produced more than one reservation; 130 replays served
+         1883 keys sent more than once (concurrently or later); 0 keys produced more than one reservation; 116 replays served
   ... (11 more [PASS] checks trimmed) ...
   [PASS] API state == what clients were told
-         811 seats confirmed by the API, 811 in the client ledger, 0 seat-level mismatches
+         813 seats confirmed by the API, 813 in the client ledger, 0 seat-level mismatches
   [PASS] metrics gauges == API state
-         seats_available 189, seats_confirmed 811, seats_total 1000, seats_reconciled 1
+         seats_available 187, seats_confirmed 813, seats_total 1000, seats_reconciled 1
   [PASS] metrics counters == observed outcomes
-         confirmed +734, replays +140, seat_taken +19144, per_user_limit +6, key_reused +10, cancelled +1
+         confirmed +730, replays +126, seat_taken +19162, per_user_limit +6, key_reused +10, cancelled +1
   [PASS] server-side audit (cross-table reconciliation)
          8/8 checks ok 
 
-show 01a10a76-39d4-7ac5-b987-dd8c8a867da7 -- inspect: https://16-4-27-248.sslip.io/shows/01a10a76-39d4-7ac5-b987-dd8c8a867da7  https://16-4-27-248.sslip.io/shows/01a10a76-39d4-7ac5-b987-dd8c8a867da7/audit  https://16-4-27-248.sslip.io/logs?q=5c9fb21d
+show 01a10ada-abac-7813-bb23-20e700ebbabf -- inspect: https://16-4-27-248.sslip.io/shows/01a10ada-abac-7813-bb23-20e700ebbabf  https://16-4-27-248.sslip.io/shows/01a10ada-abac-7813-bb23-20e700ebbabf/audit  https://16-4-27-248.sslip.io/logs?q=c2127b1b
 RESULT: PASS
 ```
 
