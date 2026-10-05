@@ -1,12 +1,24 @@
 # TLS terminator in front of the app. SITE_ADDRESS is a hostname that resolves to this VM
 # (deploy.sh defaults to <ip-with-dashes>.sslip.io); Caddy obtains and renews its
 # certificate automatically and redirects HTTP to HTTPS for it.
+(to_app) {
+	reverse_proxy app:8080 {
+		# Caddy keeps only 32 idle upstream connections by default. With thousands of
+		# requests in flight it would churn new connections to the app on every request.
+		transport http {
+			keepalive 120s
+			keepalive_idle_conns 4096
+			keepalive_idle_conns_per_host 4096
+		}
+	}
+}
+
 {$SITE_ADDRESS} {
-	reverse_proxy app:8080
+	import to_app
 }
 
 # Plain HTTP on the bare IP as well, so the service stays reachable even if certificate
 # issuance for the hostname is delayed.
 :80 {
-	reverse_proxy app:8080
+	import to_app
 }

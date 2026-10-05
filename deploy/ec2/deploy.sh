@@ -41,6 +41,8 @@ fi
 sed -i '/^APP_VERSION=/d;/^SITE_ADDRESS=/d' .env
 printf 'APP_VERSION=%s\nSITE_ADDRESS=%s\n' "$1" "$2" >> .env
 docker compose up -d --remove-orphans
+# the Caddyfile is a bind mount: reload it gracefully (no dropped connections) in case it changed
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null || true
 # keep only the running app version
 docker images seat-reservation --format '{{.Tag}}' | grep -vxF "$1" |
   xargs -r -I{} docker rmi -f "seat-reservation:{}" >/dev/null 2>&1 || true
