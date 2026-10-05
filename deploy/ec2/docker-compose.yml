@@ -1,0 +1,67 @@
+# Production stack for one small VM (deployed on a t3.micro: 2 burstable vCPUs, 1 GiB RAM).
+# deploy.sh builds the app image on a dev machine and loads it onto the VM; this file only
+# runs it. Secrets live in .env next to this file on the VM (generated there, never in git).
+name: seat-reservation
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: seats
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: seats
+    # Sized for 1 GiB shared with the app and Caddy. Not published: only the app reaches it.
+    command:
+      - postgres
+      - -c
+      - max_connections=60
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=32MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seats -d seats"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    image: seat-reservation:${APP_VERSION:?set by deploy.sh}
+    environment:
+      DATABASE_URL: postgres://seats:${POSTGRES_PASSWORD}@postgres:5432/seats?sslmode=disable
+      APP_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set in .env}
+      ADMIN_KEY: ${ADMIN_KEY:?set in .env}
+      DB_MAX_CONNS: "24" # + 3 ops connections, well under max_connections
+      GOMEMLIMIT: 300MiB # soft heap target: GC works harder instead of growing into swap
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set by deploy.sh}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates survive restarts (no re-issuing on every deploy)
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

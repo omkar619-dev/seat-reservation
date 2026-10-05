@@ -1,0 +1,12 @@
+# TLS terminator in front of the app. SITE_ADDRESS is a hostname that resolves to this VM
+# (deploy.sh defaults to <ip-with-dashes>.sslip.io); Caddy obtains and renews its
+# certificate automatically and redirects HTTP to HTTPS for it.
+{$SITE_ADDRESS} {
+	reverse_proxy app:8080
+}
+
+# Plain HTTP on the bare IP as well, so the service stays reachable even if certificate
+# issuance for the hostname is delayed.
+:80 {
+	reverse_proxy app:8080
+}
