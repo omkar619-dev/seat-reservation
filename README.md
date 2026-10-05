@@ -80,10 +80,11 @@ What it does:
 4. **Reconciliation:** the client's own ledger (built only from what the API returned) against
    `GET /shows/{id}` seat by seat, against `/metrics`, and against `GET /shows/{id}/audit`.
 
-Flags and defaults: `-requests 20000 -concurrency 1000 -users 5000 -rows 20 -cols 50
--hot-seats 5 -hot-share 0.5 -retry-share 0.1 -multi-share 0.2 -spoof-share 0.05 -limit 4
+Flags and defaults: `-requests 20000 -concurrency 1000 -users 5000 -rows 20 -cols 50` (at least
+22 columns: the last row holds the probe seats) `-hot-seats 5 -hot-share 0.5 -retry-share 0.1 -multi-share 0.2 -spoof-share 0.05 -limit 4
 -price-paise 25000 -timeout 60s -ready-wait 3m -seed <now> -out <summary.json>
--admin-key <$ADMIN_KEY or dev-admin-key>`.
+-admin-key <$ADMIN_KEY or dev-admin-key>`. The header line prints the seed, so a failing plan can
+be replayed with `-seed <n>`.
 
 Checks, as printed:
 
@@ -187,7 +188,8 @@ curl -s $BASE/shows/<show_id>/audit          # 8 cross-table invariants from one
   (`seats_available/held/confirmed/total/reconciled{show_id,show_name}`) are read from Postgres
   on every scrape for the 50 most recent shows; counters are per process. `db_up` pings Postgres
   on every scrape, and `show_audit_ok{show_id}` is the result of the scheduled audit (every 30 s,
-  5 newest shows): the two signals worth paging on. The full list and the
+  5 newest shows): the two signals worth paging on (`show_audit_errors_total` counts audits that
+  couldn't run, which also stops the last-run timestamp from advancing). The full list and the
   alerting rules are in [WRITEUP.md section 5](WRITEUP.md#5-observability).
 - **Logs:** one JSON line per request. Send `X-Request-ID` (8-128 characters of
   `[A-Za-z0-9._:-]`) to correlate; it is echoed back and logged, otherwise one is generated. The
@@ -333,13 +335,16 @@ extra fields listed here.
 | 409 | `seat_taken` | a requested seat is not available (`unavailable_seats`) |
 | 409 | `per_user_limit` | the show's limit would be exceeded (`limit`, `requested`, and `held` when known) |
 | 409 | `idempotency_key_reused` | same key, different seats |
+| 413 | `body_too_large` | body over the size limit (4 KiB for tokens, 64 KiB for reserve, 4 MiB for a show) |
 | 499 | (no body) | the client went away first; logged, and kept out of the 5xx metrics |
 | 503 | `not_ready`, `unavailable` | booting (`Retry-After: 2`); database unreachable, overloaded or timed out (`Retry-After: 1`). Retry with the same key |
 | 500 | `internal_error` | a bug; panics are recovered and counted in `http_panics_total` |
 
 ## Configuration
 
-All settings are environment variables.
+All settings are environment variables. The server checks them at boot and refuses to start
+with every problem listed at once: unparsable values, and out-of-range ones such as
+`REQUEST_TIMEOUT=0` (which would otherwise answer 503 to every request).
 
 | Variable | Default | Notes |
 |---|---|---|

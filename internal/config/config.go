@@ -61,6 +61,28 @@ func Load() (Config, error) {
 	if maxConns < 2 || maxConns > 500 {
 		errs = append(errs, errors.New("DB_MAX_CONNS must be between 2 and 500"))
 	}
+	// Parsing alone accepts nonsense like REQUEST_TIMEOUT=0, which would 503 every request.
+	if c.RequestTimeout <= 0 {
+		errs = append(errs, errors.New("REQUEST_TIMEOUT must be > 0"))
+	}
+	if c.TokenTTL <= 0 {
+		errs = append(errs, errors.New("TOKEN_TTL must be > 0"))
+	}
+	if c.ShutdownDelay < 0 {
+		errs = append(errs, errors.New("SHUTDOWN_DELAY must not be negative"))
+	}
+	if c.AuditInterval < 0 {
+		errs = append(errs, errors.New("AUDIT_INTERVAL must not be negative (0 disables the auditor)"))
+	}
+	if c.AuditShows < 1 || c.AuditShows > 50 {
+		errs = append(errs, errors.New("AUDIT_SHOWS must be between 1 and 50"))
+	}
+	if c.LogBufferLines < 1 || c.LogBufferLines > 1_000_000 {
+		errs = append(errs, errors.New("LOG_BUFFER_LINES must be between 1 and 1000000"))
+	}
+	if c.LogStdoutRate < 0 {
+		errs = append(errs, errors.New("LOG_STDOUT_RATE must not be negative (0 = unlimited)"))
+	}
 	if c.Production {
 		if len(c.JWTSecret) < 32 {
 			errs = append(errs, errors.New("JWT_SECRET must be set (32+ chars) when APP_ENV=production"))

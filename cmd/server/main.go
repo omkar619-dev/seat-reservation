@@ -120,6 +120,7 @@ func run() error {
 	case err := <-serveErr:
 		return err
 	case <-ctx.Done():
+		stop() // restore default signal handling: a second Ctrl-C / SIGTERM now exits at once
 	}
 
 	// Graceful shutdown: fail readiness first so the load balancer stops routing new
@@ -200,9 +201,14 @@ func auditOnce(ctx context.Context, store *booking.Store, pool *pgxpool.Pool, me
 		return
 	}
 	metrics.ShowAuditOK.Reset() // only export shows still in the window
+	complete := true
 	for _, sh := range recent {
 		rep, err := store.Audit(ctx, sh.ID)
 		if err != nil {
+			// "Couldn't check" is not "failed", but it must not look healthy either: count it, and
+			// don't advance the last-run timestamp, so a staleness alert fires if it persists.
+			complete = false
+			metrics.AuditErrors.Inc()
 			logger.Warn("auditor: audit did not run", slog.String("show_id", sh.ID), slog.String("error", err.Error()))
 			continue
 		}
@@ -214,7 +220,9 @@ func auditOnce(ctx context.Context, store *booking.Store, pool *pgxpool.Pool, me
 		}
 		metrics.ShowAuditOK.WithLabelValues(sh.ID, sh.Name).Set(ok)
 	}
-	metrics.AuditLastRun.SetToCurrentTime()
+	if complete {
+		metrics.AuditLastRun.SetToCurrentTime()
+	}
 }
 
 func healthcheck() int {

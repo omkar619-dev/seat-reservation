@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -102,6 +103,9 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 		case <-stop:
 			return
 		case <-ticker.C:
+			if s.Ready.Draining() { // end the stream so a shutdown never waits on a follower
+				return
+			}
 			lines, cursor = s.Logs.Since(cursor, filter, 0)
 			if len(lines) > 0 {
 				writeLines(w, lines)
@@ -195,6 +199,15 @@ func (s *server) getShow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) auditShow(w http.ResponseWriter, r *http.Request) {
+	// The audit runs 8 queries in one snapshot on the main pool. At most two run at once, so a
+	// flood of audit calls can never take more than two connections away from bookings.
+	select {
+	case s.auditSlots <- struct{}{}:
+		defer func() { <-s.auditSlots }()
+	case <-r.Context().Done():
+		storeError(w, r, r.Context().Err())
+		return
+	}
 	rep, err := s.Store.Audit(r.Context(), r.PathValue("id"))
 	if err != nil {
 		storeError(w, r, err)
@@ -211,7 +224,10 @@ func (s *server) auditShow(w http.ResponseWriter, r *http.Request) {
 // detected and counted (auth_spoof_attempts_total) so the attempt is observable.
 func (s *server) reserve(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	p, _ := auth.PrincipalFrom(ctx)
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
 	showID := r.PathValue("id")
 	var body struct {
 		Seats          []string        `json:"seats"`
@@ -221,7 +237,7 @@ func (s *server) reserve(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body, 64<<10) {
 		return
 	}
-	obs.Annotate(ctx, slog.String("show_id", showID), slog.Any("seats", body.Seats))
+	obs.Annotate(ctx, slog.String("show_id", showID), slog.Any("seats", seatsForLog(body.Seats)))
 
 	if len(body.UserID) > 0 && string(body.UserID) != "null" {
 		var claimed string
@@ -290,7 +306,10 @@ func idempotencyKey(header, body string) (string, string) {
 }
 
 func (s *server) getReservation(w http.ResponseWriter, r *http.Request) {
-	p, _ := auth.PrincipalFrom(r.Context())
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
 	rv, err := s.Store.Reservation(r.Context(), r.PathValue("id"))
 	if err == nil && rv.UserID != p.UserID && p.Role != auth.RoleAdmin {
 		err = booking.ErrNotOwner
@@ -304,7 +323,10 @@ func (s *server) getReservation(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) cancel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	p, _ := auth.PrincipalFrom(ctx)
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
 	id := r.PathValue("id")
 	obs.Annotate(ctx, slog.String("reservation_id", id))
 	rv, changed, err := s.Store.Cancel(ctx, id, p.UserID)
@@ -321,4 +343,33 @@ func (s *server) cancel(w http.ResponseWriter, r *http.Request) {
 		obs.Annotate(ctx, slog.String("outcome", "already_cancelled"))
 	}
 	writeJSON(w, http.StatusOK, rv)
+}
+
+// principal returns the verified caller. Every route that uses it is wrapped in authenticated,
+// so a missing principal means a wiring bug: fail closed with 401 instead of acting as user "".
+func principal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
+	p, ok := auth.PrincipalFrom(r.Context())
+	if !ok || p.UserID == "" {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "authentication required")
+		return auth.Principal{}, false
+	}
+	return p, true
+}
+
+// seatsForLog bounds what an unvalidated request can put in the access log: at most 10 labels
+// of at most 32 bytes each, plus a count of the rest.
+func seatsForLog(seats []string) []string {
+	const maxSeats, maxLen = 10, 32
+	out := make([]string, 0, min(len(seats), maxSeats+1))
+	for i, l := range seats {
+		if i == maxSeats {
+			out = append(out, fmt.Sprintf("...+%d more", len(seats)-maxSeats))
+			break
+		}
+		if len(l) > maxLen {
+			l = l[:maxLen] + "..."
+		}
+		out = append(out, l)
+	}
+	return out
 }

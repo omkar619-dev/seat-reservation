@@ -31,6 +31,7 @@ type Metrics struct {
 	SpoofAttempts         prometheus.Counter
 	ReconcileFailures     prometheus.Counter
 	ShowAuditOK           *prometheus.GaugeVec
+	AuditErrors           prometheus.Counter
 	AuditLastRun          prometheus.Gauge
 	HTTPRequests          *prometheus.CounterVec
 	HTTPDuration          *prometheus.HistogramVec
@@ -85,6 +86,10 @@ func NewMetrics(version string) *Metrics {
 			Name: "show_audit_ok",
 			Help: "1 if the scheduled audit of the show passed every cross-table check, 0 if any failed. Page on 0.",
 		}, []string{"show_id", "show_name"}),
+		AuditErrors: f.NewCounter(prometheus.CounterOpts{
+			Name: "show_audit_errors_total",
+			Help: "Scheduled audits that could not run (query error or timeout). A cycle with errors does not advance show_audit_last_run_timestamp_seconds.",
+		}),
 		AuditLastRun: f.NewGauge(prometheus.GaugeOpts{
 			Name: "show_audit_last_run_timestamp_seconds",
 			Help: "Unix time the scheduled auditor last completed a cycle. Alert if it stops advancing.",
@@ -156,7 +161,7 @@ func newPoolCollector(p *pgxpool.Pool) *poolCollector {
 		acquired:      d("db_pool_acquired_conns", "Connections currently checked out."),
 		idle:          d("db_pool_idle_conns", "Idle connections."),
 		acquires:      d("db_pool_acquires_total", "Successful connection acquires."),
-		emptyAcquires: d("db_pool_empty_acquires_total", "Acquires that had to wait because the pool was empty (saturation)."),
+		emptyAcquires: d("db_pool_empty_acquires_total", "Acquires that found no idle connection and waited: the pool was at max (saturation) or a connection was being dialed (e.g. after idle time)."),
 		canceled:      d("db_pool_canceled_acquires_total", "Acquires abandoned because the request context ended."),
 		wait:          d("db_pool_acquire_seconds_total", "Total time spent acquiring connections."),
 	}

@@ -49,12 +49,21 @@ docker images seat-reservation --format '{{.Tag}}' | grep -vxF "$1" |
 REMOTE
 
 echo "==> waiting for readiness"
+ready=""
 for _ in $(seq 1 60); do
-  curl -fsS --max-time 3 "http://$IP/readyz" >/dev/null 2>&1 && break
+  if out=$(curl -fsS --max-time 3 "http://$IP/readyz" 2>/dev/null); then
+    ready=1
+    break
+  fi
   sleep 2
 done
-curl -sS --max-time 5 "http://$IP/readyz"
-echo
+if [ -z "$ready" ]; then
+  echo "==> NOT READY after 2 minutes. Last answer:" >&2
+  curl -sS --max-time 5 "http://$IP/readyz" >&2 || true
+  echo "    look at: ssh -i $KEY $HOST 'cd ~/seat-reservation && docker compose logs --tail=50 app'" >&2
+  exit 1
+fi
+echo "$out"
 
 ssh_ 'grep "^ADMIN_KEY=" ~/seat-reservation/.env' > .env.live
 printf 'BASE_URL=https://%s\n' "$SITE" >> .env.live

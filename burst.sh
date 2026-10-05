@@ -17,7 +17,9 @@ if command -v go >/dev/null 2>&1; then
 fi
 
 docker build -q --target burst -t seat-reservation-burst . >/dev/null
-# localhost inside the container is the container itself; reach the host's port instead
+# localhost inside the container is the container itself; reach the host's port instead.
+# --add-host makes host.docker.internal resolve on Linux Docker Engine too (Docker Desktop has it).
 TARGET="${BASE_URL/localhost/host.docker.internal}"
 TARGET="${TARGET/127.0.0.1/host.docker.internal}"
-exec docker run --rm -e ADMIN_KEY seat-reservation-burst "$@" "$TARGET"
+exec docker run --rm --add-host=host.docker.internal:host-gateway -e ADMIN_KEY \
+  seat-reservation-burst "$@" "$TARGET"

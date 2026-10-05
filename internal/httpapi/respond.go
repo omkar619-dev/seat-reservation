@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -34,14 +35,25 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64)
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(dst); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
+		bodyError(w, r, err, "invalid JSON body: "+err.Error())
 		return false
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeError(w, r, http.StatusBadRequest, "invalid_request", "body must be a single JSON object")
+		bodyError(w, r, err, "body must be a single JSON object")
 		return false
 	}
 	return true
+}
+
+// bodyError answers 413 when the body ran past the size limit, otherwise 400 with msg.
+func bodyError(w http.ResponseWriter, r *http.Request, err error, msg string) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeError(w, r, http.StatusRequestEntityTooLarge, "body_too_large",
+			fmt.Sprintf("request body exceeds %d bytes", tooBig.Limit))
+		return
+	}
+	writeError(w, r, http.StatusBadRequest, "invalid_request", msg)
 }
 
 // writeDecline: a domain "no" is always 409 with a machine-readable reason, never a 5xx.

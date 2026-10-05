@@ -38,6 +38,9 @@ import (
 	"time"
 )
 
+// probeSeats is how many seats of the last row the probes use (see probes).
+const probeSeats = 22
+
 type config struct {
 	baseURL     string
 	adminKey    string
@@ -87,8 +90,9 @@ func parseFlags() config {
 		os.Exit(2)
 	}
 	c.baseURL = strings.TrimRight(flag.Arg(0), "/")
-	if c.rows < 3 || c.rows > 26 || c.cols < 4 || c.hotSeats < 1 || c.hotSeats > c.cols {
-		fmt.Fprintln(os.Stderr, "need 3 <= rows <= 26, cols >= 4, 1 <= hot-seats <= cols")
+	// The last row holds the probe seats: 10 for the limit probe, 10 for key reuse, 2 more.
+	if c.rows < 3 || c.rows > 26 || c.cols < probeSeats || c.hotSeats < 1 || c.hotSeats > c.cols {
+		fmt.Fprintf(os.Stderr, "need 3 <= rows <= 26, cols >= %d, 1 <= hot-seats <= cols\n", probeSeats)
 		os.Exit(2)
 	}
 	return c
@@ -372,7 +376,7 @@ func main() {
 
 func (b *burst) run() error {
 	cfg := b.cfg
-	fmt.Printf("== seat-reservation burst %s -> %s\n", b.runID, cfg.baseURL)
+	fmt.Printf("== seat-reservation burst %s -> %s (seed %d)\n", b.runID, cfg.baseURL, cfg.seed)
 
 	// 1. readiness (cold start)
 	start := time.Now()
@@ -405,7 +409,7 @@ func (b *burst) run() error {
 		}
 	}
 	mid := cfg.cols / 2
-	for k := 0; len(b.hot) < cfg.hotSeats; k++ { // centre of row A: A25, A26, A24, A27, ...
+	for k := 0; len(b.hot) < cfg.hotSeats; k++ { // spiral out from the centre of row A (50 cols: A26 A25 A27 A24 A28)
 		off := (k + 1) / 2
 		if k%2 == 1 {
 			off = -off
@@ -575,27 +579,34 @@ func (b *burst) reserve(j *job) *result {
 
 func (b *burst) pollInvariant(stop <-chan struct{}, done chan<- pollStats) {
 	var st pollStats
+	poll := func() {
+		s, err := b.show(false)
+		if err != nil {
+			st.errors++
+			return
+		}
+		st.polls++
+		if s.Available+s.Held+s.Confirmed != s.TotalSeats {
+			st.violations++
+		}
+		if s.Confirmed < st.lastConfirmed { // nothing is cancelled during the stampede
+			st.decreases++
+		}
+		st.lastConfirmed = s.Confirmed
+	}
+	// Poll at the start and at the end as well as on every tick, so even a stampede shorter
+	// than one tick (a small local run) is sampled.
+	poll()
 	t := time.NewTicker(250 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
 		case <-stop:
+			poll()
 			done <- st
 			return
 		case <-t.C:
-			s, err := b.show(false)
-			if err != nil {
-				st.errors++
-				continue
-			}
-			st.polls++
-			if s.Available+s.Held+s.Confirmed != s.TotalSeats {
-				st.violations++
-			}
-			if s.Confirmed < st.lastConfirmed { // nothing is cancelled during the stampede
-				st.decreases++
-			}
-			st.lastConfirmed = s.Confirmed
+			poll()
 		}
 	}
 }
@@ -848,7 +859,7 @@ func (b *burst) probes(results []*result) {
 	for i := 0; i < probes; i++ {
 		w := winners[i]
 		tok := b.tokens[w.job.user]
-		r := reserve(tok, []string{free[20+i%10]}, w.job.key, nil)
+		r := reserve(tok, []string{free[10+i%10]}, w.job.key, nil)
 		if _, code := parse(r); r.status == 409 && code == "idempotency_key_reused" {
 			reused++
 		}
@@ -864,7 +875,7 @@ func (b *burst) probes(results []*result) {
 
 	// Identity: a spoofed body user_id is ignored.
 	spoofTok := token("burst-" + b.runID + "-spoofer")
-	r := reserve(spoofTok, []string{free[30]}, "spoof-1", map[string]any{"user_id": "burst-" + b.runID + "-victim"})
+	r := reserve(spoofTok, []string{free[20]}, "spoof-1", map[string]any{"user_id": "burst-" + b.runID + "-victim"})
 	res := track(r)
 	b.expect(r.status == 201 && res.UserID == "burst-"+b.runID+"-spoofer", "spoofed body user_id is ignored",
 		"status %d, reservation owned by %q", r.status, res.UserID)
@@ -872,21 +883,21 @@ func (b *burst) probes(results []*result) {
 	// Cancel: non-owner is refused and nothing changes; owner cancels; seat is re-bookable.
 	ownerTok := token("burst-" + b.runID + "-owner")
 	attackerTok := token("burst-" + b.runID + "-attacker")
-	booked := track(reserve(ownerTok, []string{free[40]}, "cancel-1", nil))
+	booked := track(reserve(ownerTok, []string{free[21]}, "cancel-1", nil))
 	att := b.c.call("POST", "/reservations/"+booked.ID+"/cancel", attackerTok, nil, nil, cfg.timeout)
 	st, _ := b.show(true)
-	stillConfirmed := st != nil && seatStatus(st, free[40]) == "confirmed"
+	stillConfirmed := st != nil && seatStatus(st, free[21]) == "confirmed"
 	b.expect((att.status == 403 || att.status == 404) && stillConfirmed, "only the owner can cancel",
-		"non-owner cancel -> %d; seat %s still confirmed: %v", att.status, free[40], stillConfirmed)
+		"non-owner cancel -> %d; seat %s still confirmed: %v", att.status, free[21], stillConfirmed)
 	own := b.c.call("POST", "/reservations/"+booked.ID+"/cancel", ownerTok, nil, nil, cfg.timeout)
 	if own.status == 200 {
 		b.release(booked)
 		b.cancelled++
 	}
-	rebook := reserve(token("burst-"+b.runID+"-rebooker"), []string{free[40]}, "rebook-1", nil)
+	rebook := reserve(token("burst-"+b.runID+"-rebooker"), []string{free[21]}, "rebook-1", nil)
 	track(rebook)
 	b.expect(own.status == 200 && rebook.status == 201, "owner cancel makes the seat re-bookable",
-		"owner cancel -> %d; rebook of %s -> %d", own.status, free[40], rebook.status)
+		"owner cancel -> %d; rebook of %s -> %d", own.status, free[21], rebook.status)
 
 	// A hot seat stays sold.
 	late := reserve(token("burst-"+b.runID+"-late"), []string{b.hot[0]}, "late-1", nil)

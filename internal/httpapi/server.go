@@ -48,10 +48,13 @@ type Config struct {
 	StartedAt      time.Time
 }
 
-type server struct{ Config }
+type server struct {
+	Config
+	auditSlots chan struct{} // bounds concurrent public audits (see auditShow)
+}
 
 func New(c Config) http.Handler {
-	s := &server{c}
+	s := &server{Config: c, auditSlots: make(chan struct{}, 2)}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.index)
@@ -101,10 +104,14 @@ func (s *server) observe(next http.Handler) http.Handler {
 			route = "unmatched"
 		}
 		elapsed := time.Since(start)
-		s.Metrics.ObserveHTTP(r.Method, route, rec.status, elapsed)
+		s.Metrics.ObserveHTTP(methodLabel(r.Method), route, rec.status, elapsed)
 
 		level := slog.LevelInfo
 		switch {
+		case rec.status == http.StatusServiceUnavailable:
+			// Expected while booting, draining or while the database is down: page on metrics
+			// (db_up, the 503 rate), not on log levels. WARN still always reaches stdout.
+			level = slog.LevelWarn
 		case rec.status >= 500:
 			level = slog.LevelError
 		case quietRoutes[route] && rec.status < 400:
@@ -173,6 +180,17 @@ func (s *server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// methodLabel bounds the method label on metrics. A client can send any token as a method, and
+// each distinct value would otherwise mint new series forever. The raw method still goes to logs.
+func methodLabel(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions:
+		return m
+	}
+	return "OTHER"
 }
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)

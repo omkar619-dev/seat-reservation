@@ -37,9 +37,11 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		testPool = pool
-		defer pool.Close()
 	}
 	code := m.Run()
+	if testPool != nil {
+		testPool.Close() // not deferred: os.Exit skips deferred calls
+	}
 	os.Exit(code)
 }
 

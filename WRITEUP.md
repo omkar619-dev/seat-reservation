@@ -299,7 +299,10 @@ Counters are per process: run one replica, or scrape each replica.
 **Logs.** One JSON line per request, written by the middleware after the handler: `request_id`
 (from `X-Request-ID` if valid, otherwise generated; echoed back), method, path, route, status,
 `duration_ms`, plus the handler's annotations: `user_id`, `show_id`, `seats`, `reservation_id`,
-`outcome`, `reason`, `stage`, `amount_paise`, `ignored_body_user_id`. 5xx lines are ERROR.
+`outcome`, `reason`, `stage`, `amount_paise`, `ignored_body_user_id`. 500s are ERROR; 503s
+(booting, draining, database down) are WARN, because those page through `db_up` and the 503 rate,
+not through log levels. Metric labels stay bounded: the route pattern, never the raw path, and any
+method outside the standard set is recorded as `OTHER`.
 `GET /logs?limit=&q=&follow=1` serves an in-memory tail of the last 20,000 lines (`follow=1`
 streams NDJSON).
 
@@ -373,7 +376,9 @@ histogram shows all 60,102 reserve requests of those runs finished within 5 s in
 
 - **The bottleneck is TLS, not the database.** `docker stats` during a 3,000-connection run:
   Caddy (TLS termination and proxying) used 110-124% of the 200% CPU budget, the app 20-30%,
-  Postgres 15-40%. 98% of `seat_taken` declines were answered by the read-only precheck, and
+  Postgres 15-40%. A second 3,000-connection run, after enlarging Caddy's connection pool, looked
+  the same: Caddy 76-187% (peaking during the warm-up's TLS handshakes), the app 25-44%, Postgres
+  37-61%. 98% of `seat_taken` declines were answered by the read-only precheck, and
   `db_tx_retries_total` stayed at 0. More headroom means fixing the TLS hop (terminate TLS in the
   Go server, or a compute-optimized instance), not the schema.
 - **A 502 race, caught by the zero-5xx check.** Caddy keeps only 32 idle upstream connections by
@@ -406,6 +411,13 @@ histogram shows all 60,102 reserve requests of those runs finished within 5 s in
   bursts, and diagnosed the Caddy 502 race from the proxy's logs.
 - Caught by running tests, not by review: the idempotency-key scope (per user changed to per
   (show, user), section 2) and a bookkeeping bug in the burst tool.
+- A second, AI-assisted review pass (three reviewers writing study notes, each checking code
+  against claims) found 17 small issues, none affecting correctness; 13 were fixed in one commit:
+  the burst tool crashing with fewer than 41 columns and skipping its invariant poll on very short
+  runs, `deploy.sh` reporting success when the app never became ready, unbounded metric labels
+  from made-up HTTP methods, 413 for oversized bodies, fail-closed auth in handlers, bounded
+  request logging, config range checks, at most two concurrent public audits, a log follower no
+  longer delaying shutdown, and auditor errors made visible.
 - What I directed and decided:
   - TODO(Omkar): the deploy platform: you rejected paying for Railway and chose to reuse your
     stopped coturn EC2 instance (t3.micro, Mumbai); say why in your words.
@@ -424,8 +436,9 @@ histogram shows all 60,102 reserve requests of those runs finished within 5 s in
 3. **TLS capacity.** The measured bottleneck at 3,000 connections is TLS termination and the
    proxy hop, not the database: terminate TLS in the Go server, or use a compute-optimized
    instance.
-4. **HTTP-layer tests.** The store has real-Postgres concurrency tests; handlers, status mapping
-   and auth are covered only end to end by the burst.
+4. **HTTP-layer tests.** The store has real-Postgres concurrency tests, and `respond_test.go` covers
+   body limits, method labels and fail-closed auth; status mapping for every route is still covered
+   only end to end by the burst. Next: `httptest` tests per route.
 5. **Multiple replicas:** nothing in the decision path is per-process, and the show cache is safe
    because shows are immutable. Scrape each replica; add PgBouncer (transaction mode) once
    replicas x `DB_MAX_CONNS` approaches `max_connections`.
