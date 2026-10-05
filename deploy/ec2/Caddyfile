@@ -5,8 +5,13 @@
 	reverse_proxy app:8080 {
 		# Caddy keeps only 32 idle upstream connections by default. With thousands of
 		# requests in flight it would churn new connections to the app on every request.
+		#
+		# The proxy must drop idle connections BEFORE the app does, or it can reuse one at the
+		# instant the app closes it ("broken pipe" -> 502). The app closes a connection that
+		# never carried a request after ReadHeaderTimeout (10s) and an idle keep-alive one
+		# after IdleTimeout (120s), so Caddy's idle timeout stays well under both.
 		transport http {
-			keepalive 120s
+			keepalive 4s
 			keepalive_idle_conns 4096
 			keepalive_idle_conns_per_host 4096
 		}
