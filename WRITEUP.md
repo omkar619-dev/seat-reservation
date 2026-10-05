@@ -261,7 +261,8 @@ seat twice.
   committed reservation back. The burst tool retries transport errors and 5xx exactly this way.
 - What could relax later: read-only show state (`GET /shows/{id}`) could come from a replica or
   cache, stale by replication lag, if labelled as such. The reserve decision never.
-- Caveat: the Railway setup has one Postgres instance, so if it is down, sales stop (by design).
+- Caveat: the live deployment is one VM with one Postgres instance, so if it is down, sales stop
+  (by design).
   With a standby, asynchronous replication can lose the last acknowledged commits on failover,
   leaving a client with a 201 the new primary doesn't know. I'd want synchronous replication
   before calling this CP end to end.
@@ -302,8 +303,8 @@ Counters are per process: run one replica, or scrape each replica.
 `GET /logs?limit=&q=&follow=1` serves an in-memory tail of the last 20,000 lines (`follow=1`
 streams NDJSON).
 
-Railway drops logs above 500 lines/s per replica and a burst emits about 20k lines/s, so the
-platform log would lose lines at random. stdout goes through a token bucket (`LOG_STDOUT_RATE`,
+Hosted platforms cap log throughput (Railway drops anything above 500 lines/s per replica) and a
+burst emits about 20k lines/s, so a platform log would lose lines at random. stdout goes through a token bucket (`LOG_STDOUT_RATE`,
 400/s) in which WARN and ERROR always pass; drops are reported in-band (at most once a second) and
 counted. The `/logs` tail and the metrics still get everything.
 
@@ -335,7 +336,8 @@ not draining, and the database answers a ping. Boot never waits on the database:
 starts right away while a background loop pings and migrates with backoff (0.5 s doubling to
 10 s), migrations under a `pg_advisory_lock`; business routes return 503 `not_ready` until then.
 On SIGTERM the instance fails readiness and sets `app_ready` to 0, keeps serving for 3 s, then
-drains in-flight requests for up to 30 s (`railway.json` allows 40 s).
+drains in-flight requests for up to 30 s (the VM's compose file and `railway.json` both allow
+40 s before a hard kill).
 
 **What pages me at 2 am.**
 
@@ -355,6 +357,38 @@ on-sale `seat_taken` can be 95% or more of reserve traffic (about 96% in the bur
 and that is the system working. Pool waits alone are not a page either: during a burst nearly
 every acquire waits, because the 40-connection pool is the intended queue in front of Postgres.
 
+### What the live box showed
+
+The live deployment is one t3.micro (2 burstable vCPUs, 1 GiB RAM) running Postgres, the app and
+Caddy. Burst runs against it from a laptop in India, every check passing:
+
+| Concurrency | Throughput | p50 | p99 | max | 5xx |
+|---|---|---|---|---|---|
+| 1,000 | 1,043 req/s | 0.90 s | 1.99 s | 3.47 s | 0 |
+| 3,000 | 572 req/s | 4.79 s | 9.57 s | 13.8 s | 0 |
+
+- **The bottleneck is TLS, not the database.** `docker stats` during a 3,000-connection run:
+  Caddy (TLS termination and proxying) used 110-124% of the 200% CPU budget, the app 20-30%,
+  Postgres 15-40%. 98% of `seat_taken` declines were answered by the read-only precheck, and
+  `db_tx_retries_total` stayed at 0. More headroom means fixing the TLS hop (terminate TLS in the
+  Go server, or a compute-optimized instance), not the schema.
+- **A 502 race, caught by the zero-5xx check.** Caddy keeps only 32 idle upstream connections by
+  default, so under thousands of in-flight requests it kept redialing the app. After I raised the
+  pool, a 3,000-connection run produced 33 502s from Caddy and none from the app, all within
+  150 ms. Go's HTTP transport pools some freshly dialed connections without using them; the app
+  closed those after `ReadHeaderTimeout` (10 s), and Caddy reused a few at that instant (`broken
+  pipe`). The rule is the same as an ALB idle timeout against a backend's keep-alive: the proxy
+  must drop idle connections before anything makes the upstream close them. Caddy's idle timeout
+  is now 4 s; the re-run had 0 5xx, and p99 fell from 27.6 s (default pool) to 9.6 s.
+- **Memory.** At 3,000 connections Caddy peaked near 295 MiB, the app near 108 MiB and Postgres
+  near 90 MiB, with about 160 MiB of swap in use. So overload degrades instead of crashing:
+  Postgres runs with `oom_score_adj -900` (the database is the last process the kernel may
+  kill), Caddy and the app have soft heap targets (`GOMEMLIMIT`), and the VM has 2 GiB of swap.
+- **Cold start.** After applying 168 package updates I rebooted the VM. Docker starts at boot,
+  every container has `restart: unless-stopped`, and the app opens its listener before the
+  database is reachable and migrates in the background, so `/readyz` was green again about 20 s
+  after the reboot command with no manual step.
+
 ## 6. AI usage
 
 > TODO(Omkar): rewrite in your own words. This is a factual skeleton: fill the placeholders,
@@ -364,11 +398,13 @@ every acquire waits, because the 40-connection pool is the intended queue in fro
   `Co-Authored-By: Claude` trailer.
 - Claude proposed the architecture and wrote most of the code, the concurrency tests, the burst
   tool and the first drafts of README.md and this write-up. It also found Railway's 500 lines/s
-  log limit, which led to the stdout rate limiter.
+  log limit, which led to the stdout rate limiter, set up the EC2 deployment, ran the live
+  bursts, and diagnosed the Caddy 502 race from the proxy's logs.
 - Caught by running tests, not by review: the idempotency-key scope (per user changed to per
   (show, user), section 2) and a bookkeeping bug in the burst tool.
 - What I directed and decided:
-  - TODO(Omkar): the deploy platform (Railway) and why.
+  - TODO(Omkar): the deploy platform: you rejected paying for Railway and chose to reuse your
+    stopped coturn EC2 instance (t3.micro, Mumbai); say why in your words.
   - TODO(Omkar): scope calls, e.g. confirm-on-reserve instead of timed holds; what was left out.
   - TODO(Omkar): what you reviewed line by line; what you asked to change or pushed back on.
 - How I checked that the understanding is mine:
@@ -381,18 +417,21 @@ every acquire waits, because the 40-connection pool is the intended queue in fro
    extended for `held`.
 2. **Alerting in the repo:** commit the section 5 pages as Prometheus alert rules plus a Grafana
    dashboard JSON, and have the auditor cover every show on sale (today: the 5 newest).
-3. **HTTP-layer tests.** The store has real-Postgres concurrency tests; handlers, status mapping
+3. **TLS capacity.** The measured bottleneck at 3,000 connections is TLS termination and the
+   proxy hop, not the database: terminate TLS in the Go server, or use a compute-optimized
+   instance.
+4. **HTTP-layer tests.** The store has real-Postgres concurrency tests; handlers, status mapping
    and auth are covered only end to end by the burst.
-4. **Multiple replicas:** nothing in the decision path is per-process, and the show cache is safe
+5. **Multiple replicas:** nothing in the decision path is per-process, and the show cache is safe
    because shows are immutable. Scrape each replica; add PgBouncer (transaction mode) once
    replicas x `DB_MAX_CONNS` approaches `max_connections`.
-5. **Shard by `show_id`:** one owning primary per show. A reservation never spans shows, so no
+6. **Shard by `show_id`:** one owning primary per show. A reservation never spans shows, so no
    distributed transactions.
-6. **Admission control:** a waiting room or queue in front of very large on-sales, and per-user
+7. **Admission control:** a waiting room or queue in front of very large on-sales, and per-user
    rate limits.
-7. **Idempotency-key retention:** keys never expire today; define a window and clean up.
-8. **A real IdP:** verify OIDC tokens via JWKS and remove `POST /auth/token`.
-9. **Chaos test:** kill or partition Postgres mid-burst; expect 503s, zero double sells, a clean
+8. **Idempotency-key retention:** keys never expire today; define a window and clean up.
+9. **A real IdP:** verify OIDC tokens via JWKS and remove `POST /auth/token`.
+10. **Chaos test:** kill or partition Postgres mid-burst; expect 503s, zero double sells, a clean
    recovery and a passing audit.
-10. **Load from several machines and regions:** the local numbers have the client on the same
+11. **Load from several machines and regions:** the local numbers have the client on the same
     laptop as the server.

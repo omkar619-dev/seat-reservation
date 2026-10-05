@@ -46,6 +46,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # SIGTERM -> fail readiness, 3s delay, drain up to 30s; compose's default 10s would cut it short.
+    stop_grace_period: 40s
     restart: unless-stopped
 
   caddy:

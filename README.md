@@ -4,13 +4,13 @@ A seat reservation API built for on-sale bursts: thousands of buyers hit the sam
 same moment, no seat may be sold twice, no user may go over the per-show limit, and a retried
 request must never book twice. Go 1.26, Postgres 17, pgx.
 
-- **Live:** `https://<LIVE_URL>` (`/readyz`, `/metrics`, `/logs`)
+- **Live:** https://16-4-27-248.sslip.io ([`/readyz`](https://16-4-27-248.sslip.io/readyz), [`/metrics`](https://16-4-27-248.sslip.io/metrics),
+  [`/logs`](https://16-4-27-248.sslip.io/logs?limit=50)). One AWS t3.micro in Mumbai running Postgres, the app and
+  Caddy (HTTPS) with Docker Compose; see [Deploy](#deploy).
+- **Admin key** (creates shows, so the burst needs it too): shared in the submission email.
 - **Design write-up:** [WRITEUP.md](WRITEUP.md) covers the atomic decision, idempotency, holds,
-  partitions, observability, AI usage and next steps.
-
-> **TODO(Omkar): not deployed yet.** Deploy to Railway (see [Deploy](#deploy-railway)), replace
-> every `https://<LIVE_URL>` in README.md and WRITEUP.md, and add a line here on how reviewers
-> get the `ADMIN_KEY` the burst needs to create its show.
+  partitions, observability (including what the live box showed under load), AI usage and next
+  steps.
 
 ## Run locally
 
@@ -21,7 +21,7 @@ burst falls back to Docker). From a clean checkout:
 docker compose up --build
 ```
 
-This builds the same Dockerfile and runtime image the Railway deploy uses (static binary on
+This builds the same Dockerfile and runtime image the live deployment runs (static binary on
 distroless, non-root) and starts it next to Postgres 17.
 
 | | |
@@ -55,9 +55,9 @@ To run with the read-only precheck off, so every request goes through the transa
 
 ```bash
 ./burst.sh http://localhost:8080
-ADMIN_KEY=<server admin key> ./burst.sh https://<LIVE_URL>
-make burst BASE_URL=https://<LIVE_URL>                        # same; ADMIN_KEY comes from the environment
-./burst.sh https://<LIVE_URL> -requests 50000 -concurrency 2000   # flags go after the URL
+ADMIN_KEY=<admin key> ./burst.sh https://16-4-27-248.sslip.io
+make burst BASE_URL=https://16-4-27-248.sslip.io             # same; ADMIN_KEY comes from the environment
+./burst.sh https://16-4-27-248.sslip.io -concurrency 3000    # flags go after the URL
 ```
 
 `burst.sh` runs `go run ./cmd/burst` when Go is installed. Without Go it builds the Dockerfile's
@@ -110,55 +110,66 @@ Checks, as printed:
 | `metrics counters == observed outcomes` | counter deltas equal what the client saw (WARN, not FAIL: exact only with one replica and no other traffic) |
 | `server-side audit (cross-table reconciliation)` | all 8 audit checks pass |
 
-Sample output, trimmed, from a local run on the final commit (Docker on a MacBook, client on
-the same machine; numbers vary run to run):
+Results against the live deployment (client: a laptop in India on home broadband; server: the
+t3.micro), every check passing:
+
+| Concurrency | Requests | Throughput | p50 | p95 | p99 | max | 5xx |
+|---|---|---|---|---|---|---|---|
+| 1,000 | 20,000 | 1,043 req/s | 0.90 s | 1.34 s | 1.99 s | 3.47 s | 0 |
+| 3,000 | 20,000 | 572 req/s | 4.79 s | 7.88 s | 9.57 s | 13.8 s | 0 |
+
+At 3,000 connections the box is CPU-bound on TLS termination in Caddy, not on the app or Postgres
+([WRITEUP.md section 5](WRITEUP.md#what-the-live-box-showed)). Locally (Docker on a MacBook, client
+on the same machine) the same burst runs at 19-22k req/s with p99 under 200 ms.
+
+Sample output, trimmed, from the live 1,000-connection run:
 
 ```text
-== seat-reservation burst b426a68b -> http://localhost:8080
-ready after 6ms
-show 01a10812-212a-796f-8b52-36882c7eb493: 1000 seats (20 rows x 50), limit 4, hot seats [A26 A25 A27 A24 A28]
+== seat-reservation burst 5c9fb21d -> https://16-4-27-248.sslip.io
+ready after 46ms
+show 01a10a76-39d4-7ac5-b987-dd8c8a867da7: 1000 seats (20 rows x 50), limit 4, hot seats [A26 A25 A27 A24 A28]
 minted 5000 user tokens
 stampede: 20000 requests, 1000 concurrent, 5000 users ...
-stampede done in 1.049s (19067 req/s); latency p50 46ms p95 96ms p99 138ms max 187ms
+stampede done in 19.171s (1043 req/s); latency p50 897ms p95 1.341s p99 1.988s max 3.471s
 
 outcomes (stampede + probes)
-  201 confirmed (new)              710
-  201 idempotent replay            119
+  201 confirmed (new)              734
+  201 idempotent replay            140
   409 idempotency_key_reused         10
   409 per_user_limit                  6
-  409 seat_taken                  19189
+  409 seat_taken                  19144
   5xx                                0
   no response (transport)            0
 
 checks
   [PASS] no seat sold twice
-         0 seats appeared in two different reservations across 812 confirmed responses
+         0 seats appeared in two different reservations across 857 confirmed responses
   [PASS] zero 5xx
          0 5xx responses across the stampede
   [PASS] zero transport errors (after same-key retries)
          0 requests never got a response
   [PASS] hot seats: exactly one winner each, everyone else 409
-         A26: 1997 attempts, 1 winner, 0 non-409; A25: 2008 attempts, 1 winner, 0 non-409; A27: 2011 attempts, 1 winner, 0 non-409; A24: 1983 attempts, 1 winner, 0 non-409; A28: 2011 attempts, 1 winner, 0 non-409
+         A26: 1993 attempts, 1 winner, 0 non-409; A25: 1979 attempts, 1 winner, 0 non-409; A27: 2022 attempts, 1 winner, 0 non-409; A24: 2021 attempts, 1 winner, 0 non-409; A28: 1998 attempts, 1 winner, 0 non-409
   [PASS] idempotent retries move nothing extra
-         1905 keys sent more than once (concurrently or later); 0 keys produced more than one reservation; 109 replays served
+         1907 keys sent more than once (concurrently or later); 0 keys produced more than one reservation; 130 replays served
   ... (11 more [PASS] checks trimmed) ...
   [PASS] API state == what clients were told
-         806 seats confirmed by the API, 806 in the client ledger, 0 seat-level mismatches
+         811 seats confirmed by the API, 811 in the client ledger, 0 seat-level mismatches
   [PASS] metrics gauges == API state
-         seats_available 194, seats_confirmed 806, seats_total 1000, seats_reconciled 1
+         seats_available 189, seats_confirmed 811, seats_total 1000, seats_reconciled 1
   [PASS] metrics counters == observed outcomes
-         confirmed +710, replays +119, seat_taken +19189, per_user_limit +6, key_reused +10, cancelled +1
+         confirmed +734, replays +140, seat_taken +19144, per_user_limit +6, key_reused +10, cancelled +1
   [PASS] server-side audit (cross-table reconciliation)
-         8/8 checks ok
+         8/8 checks ok 
 
-show 01a10812-212a-796f-8b52-36882c7eb493 -- inspect: http://localhost:8080/shows/01a10812-212a-796f-8b52-36882c7eb493  http://localhost:8080/shows/01a10812-212a-796f-8b52-36882c7eb493/audit  http://localhost:8080/logs?q=b426a68b
+show 01a10a76-39d4-7ac5-b987-dd8c8a867da7 -- inspect: https://16-4-27-248.sslip.io/shows/01a10a76-39d4-7ac5-b987-dd8c8a867da7  https://16-4-27-248.sslip.io/shows/01a10a76-39d4-7ac5-b987-dd8c8a867da7/audit  https://16-4-27-248.sslip.io/logs?q=5c9fb21d
 RESULT: PASS
 ```
 
 ## Metrics and logs
 
 ```bash
-BASE=https://<LIVE_URL>   # or http://localhost:8080
+BASE=https://16-4-27-248.sslip.io   # or http://localhost:8080
 curl -s $BASE/metrics | grep -E '^(reservations_|reservation_seats_|seats_|db_tx_retries_total|db_pool_empty)'
 curl -s "$BASE/logs?limit=50"               # last 50 lines as NDJSON (default 200, max 5000)
 curl -s "$BASE/logs?q=seat_taken&limit=20"  # substring filter
@@ -180,9 +191,10 @@ curl -s $BASE/shows/<show_id>/audit          # 8 cross-table invariants from one
   It is public by design for this assignment; `PUBLIC_LOGS=false` turns it off (404). Successful
   `/healthz`, `/readyz`, `/metrics` and `/logs` requests log at DEBUG, so they stay out of the
   default view.
-- **Platform logs** (Railway's log view; `make logs` locally) get stdout, which is rate limited
-  to 400 info lines/s because Railway drops anything above 500 lines/s per replica. WARN and
-  ERROR always pass, and drops are reported in-band and counted in
+- **Container logs** (`docker logs` on the VM, rotated at 5 x 20 MB; `make logs` locally) get
+  stdout, which is rate limited to 400 info lines/s, because hosted platforms cap log throughput
+  (Railway drops anything above 500 lines/s per replica) and a burst emits about 20k lines/s.
+  WARN and ERROR always pass, and drops are reported in-band and counted in
   `log_stdout_lines_dropped_total`. During a burst, use `/logs` and `/metrics`.
 
 A real reserve line:
@@ -219,7 +231,7 @@ this endpoint would go away.
 Uses `curl` and `jq`. Responses below are real, from the local stack.
 
 ```bash
-BASE=http://localhost:8080        # or https://<LIVE_URL>
+BASE=http://localhost:8080        # or https://16-4-27-248.sslip.io
 ADMIN_KEY=dev-admin-key           # the server's ADMIN_KEY
 
 ADMIN=$(curl -s -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" \
@@ -342,23 +354,39 @@ All settings are environment variables.
 | `LOG_STDOUT_RATE` | `400` | info/debug lines per second to stdout; `0` means unlimited |
 | `LOG_LEVEL` | `info` | |
 
-## Deploy (Railway)
+## Deploy
 
-Prepared, not done yet (see the TODO at the top).
+### Live: one small VM on AWS EC2
 
-1. Create a project from this repo. `railway.json` sets a Dockerfile build, a deploy gated on
-   `GET /readyz` (120 s timeout), restart on failure (up to 10), 10 s of overlap between old and
-   new deployments, and a 40 s SIGTERM-to-SIGKILL window (covers the 3 s readiness delay plus
-   the 30 s drain).
-2. Add a PostgreSQL service in the same region.
-3. Set service variables: `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `JWT_SECRET` (32+
-   characters), `ADMIN_KEY` (16+ characters). The image already defaults to
-   `APP_ENV=production`, so the server refuses to start without the last two. The server
-   listens on `$PORT`, which Railway provides.
-4. Generate a public domain: that is `https://<LIVE_URL>`. Keep one replica. Correctness does
-   not depend on it, but the burst compares per-process counters; with N replicas, scrape each
-   replica directly.
-5. `ADMIN_KEY=<value> ./burst.sh https://<LIVE_URL>`
+The live service is a single t3.micro in ap-south-1 (2 burstable vCPUs with unlimited credits,
+1 GiB RAM, Ubuntu 24.04) behind a fixed Elastic IP. Everything is in `deploy/ec2/`:
+
+| File | Role |
+|---|---|
+| `bootstrap.sh` | one-time host setup: Docker and Compose, rotated container logs, 2 GiB swap, deeper accept queues |
+| `docker-compose.yml` | Postgres 17 (sized for 1 GiB, not published, last in line for the OOM killer), the app (`DB_MAX_CONNS=24`, `GOMEMLIMIT=300MiB`), Caddy |
+| `Caddyfile` | automatic HTTPS for `<ip-with-dashes>.sslip.io`, plain HTTP on the bare IP, upstream idle timeout below the app's |
+| `deploy.sh` | cross-compiles the image for linux/amd64 on the dev machine, streams it with `docker save \| ssh docker load`, generates secrets on the VM on first deploy, waits for `/readyz`, copies `ADMIN_KEY` to the gitignored `.env.live` |
+
+```bash
+ssh ubuntu@<ip> 'bash -s' < deploy/ec2/bootstrap.sh   # once per VM
+deploy/ec2/deploy.sh ubuntu@<ip>                       # every deploy, about a minute
+```
+
+The security group allows 80 and 443 from anywhere and 22 from one address. Every container
+restarts on failure and on boot (`restart: unless-stopped`, Docker enabled at boot), so a cold
+start needs no manual step. Tested: after applying 168 package updates I rebooted the VM, and
+`/readyz` was green again about 20 s after the reboot command.
+
+### Alternative: Railway
+
+`railway.json` is ready for a Railway deploy: Dockerfile build, deploy gated on `GET /readyz`
+(120 s timeout), restart on failure (up to 10), 10 s overlap between deployments, and a 40 s
+SIGTERM-to-SIGKILL window (the 3 s readiness delay plus the 30 s drain). Add a PostgreSQL
+service in the same region and set `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `JWT_SECRET` (32+
+characters) and `ADMIN_KEY` (16+ characters); the image defaults to `APP_ENV=production`, so the
+server refuses to start without the last two. Keep one replica so the burst's per-process
+counter check stays exact.
 
 ## Code map
 
