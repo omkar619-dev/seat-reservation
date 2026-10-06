@@ -9,7 +9,7 @@ request must never book twice. Go 1.26, Postgres 17, pgx.
   Caddy (HTTPS) with Docker Compose; see [Deploy](#deploy).
 - **Admin key** (creates shows, so the burst needs it too): shared in the submission email.
 - **Design write-up:** [WRITEUP.md](WRITEUP.md) covers the atomic decision, idempotency, holds,
-  partitions, observability (including what the live box showed under load), AI usage and next
+  partitions, observability (including what the live box showed under load), AI usage and the next
   steps.
 
 ## Run locally
@@ -388,7 +388,7 @@ restarts on failure and on boot (`restart: unless-stopped`, Docker enabled at bo
 start needs no manual step. Tested: after applying 168 package updates I rebooted the VM, and
 `/readyz` was green again about 20 s after the reboot command.
 
-### Alternative: Railway
+### Alternative: Railway (prepared, not used for the live URL)
 
 `railway.json` is ready for a Railway deploy: Dockerfile build, deploy gated on `GET /readyz`
 (120 s timeout), restart on failure (up to 10), 10 s overlap between deployments, and a 40 s

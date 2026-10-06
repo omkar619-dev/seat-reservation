@@ -85,9 +85,10 @@ limit would be exceeded: 409 `per_user_limit`, and the rollback undoes step 2. T
 the seats the user currently has for the show; cancel decrements it.
 
 **Why READ COMMITTED, not SERIALIZABLE.** The guarantee comes from row locks plus predicates that
-READ COMMITTED re-checks against the latest row version. Under SERIALIZABLE, any loser whose
-snapshot predates the winner's commit gets a `40001` serialization failure instead of a clean
-0-row result, so a hot-seat race becomes a pile of aborted transactions to retry.
+READ COMMITTED re-checks against the latest row version. Under SERIALIZABLE, every request that
+lost the race (its snapshot was taken before the winning commit) gets a `40001` serialization
+failure instead of a clean 0-row result, so a hot-seat race becomes a pile of aborted transactions
+to retry.
 
 **Why not `SKIP LOCKED`.** For a specific seat, skipping a locked row declines a request whose
 competitor may still roll back (say, a 2-seat request that fails on its other seat). Under
@@ -116,11 +117,12 @@ both modes; with the guard restored the suite passes (re-verified on the final c
 
 ### The read-only precheck
 
-Most on-sale requests are losers arriving after the winner committed. With `RESERVE_PRECHECK=true`
+In an on-sale, most requests lose: they arrive after someone has already bought the seat they
+want. With `RESERVE_PRECHECK=true`
 (the default), `Reserve` first runs one read-only statement, so one snapshot, returning the
 requested seats that are not available, the user's counter, and any reservation already made with
-this key. It can replay, reject key reuse, decline `seat_taken` or `per_user_limit`, or fall
-through to the transaction. It never takes a seat; only `claimSeatsSQL` does.
+this key. It can replay, reject key reuse, decline `seat_taken` or `per_user_limit`, or hand the
+request on to the transaction. It never takes a seat; only `claimSeatsSQL` does.
 
 A snapshot decline is safe because it only asserts "at this snapshot the seat was not available",
 which was true. It also cannot turn an already-committed retry into a 409: a reservation row and
@@ -139,8 +141,9 @@ same machine:
 | off | 12.6k req/s | 76 ms | 131 ms | all checks pass, 0 5xx |
 
 Each hot seat drew about 2,000 attempts and had exactly 1 winner in both modes. With the precheck
-on, about 95% of `seat_taken` declines are answered by it, which keeps losers out of the write path
-(no row locks, no WAL, no rolled-back inserts). A re-run on the final commit gave 19.1k req/s,
+on, about 95% of `seat_taken` declines are answered by that single read, so those requests never
+start a transaction: they take no row locks, write nothing to Postgres's write-ahead log (WAL), and
+leave no inserted-then-rolled-back rows behind. A re-run on the final commit gave 19.1k req/s,
 p50 46 ms, p99 138 ms: single laptop runs, indicative only. Because the transaction is correct on
 its own, the precheck is a performance switch, not part of the correctness argument.
 
@@ -400,32 +403,38 @@ histogram shows all 60,102 reserve requests of those runs finished within 5 s in
 
 ## 6. AI usage
 
-> TODO(Omkar): rewrite in your own words. This is a factual skeleton: fill the placeholders,
-> delete anything that isn't true, keep it specific.
-
-- I built this in one day pairing with Claude Code (Claude Opus 5.5). Every commit carries a
-  `Co-Authored-By: Claude` trailer.
-- Claude proposed the architecture and wrote most of the code, the concurrency tests, the burst
-  tool and the first drafts of README.md and this write-up. It also found Railway's 500 lines/s
-  log limit, which led to the stdout rate limiter, set up the EC2 deployment, ran the live
-  bursts, and diagnosed the Caddy 502 race from the proxy's logs.
-- Caught by running tests, not by review: the idempotency-key scope (per user changed to per
-  (show, user), section 2) and a bookkeeping bug in the burst tool.
-- A second, AI-assisted review pass (three reviewers writing study notes, each checking code
-  against claims) found 17 small issues, none affecting correctness; 13 were fixed in one commit:
-  the burst tool crashing with fewer than 41 columns and skipping its invariant poll on very short
-  runs, `deploy.sh` reporting success when the app never became ready, unbounded metric labels
-  from made-up HTTP methods, 413 for oversized bodies, fail-closed auth in handlers, bounded
-  request logging, config range checks, at most two concurrent public audits, a log follower no
-  longer delaying shutdown, and auditor errors made visible.
-- What I directed and decided:
-  - TODO(Omkar): the deploy platform: you rejected paying for Railway and chose to reuse your
-    stopped coturn EC2 instance (t3.micro, Mumbai); say why in your words.
-  - TODO(Omkar): scope calls, e.g. confirm-on-reserve instead of timed holds; what was left out.
-  - TODO(Omkar): what you reviewed line by line; what you asked to change or pushed back on.
-- How I checked that the understanding is mine:
-  - TODO(Omkar): e.g. explaining sections 1-3 back without notes; what you re-derived or re-ran
-    yourself; what you would still need to look up.
+- I built this in about a day of pairing with Claude Code (Claude Opus 5.5). Every commit carries a
+  `Co-Authored-By: Claude` trailer, so the history shows what was done together.
+- **What Claude did:** proposed the architecture and wrote most of the code, the concurrency tests,
+  the burst tool and the first drafts of README.md and this write-up. It also found Railway's
+  500 lines/s log limit (which led to the stdout rate limiter), set up the EC2 deployment, ran the
+  live bursts, and diagnosed the Caddy 502 race from the proxy's logs.
+- **Caught by tests and tools, not by review:** the idempotency-key scope (per user, changed to
+  per (show, user); section 2) and a bookkeeping bug in the burst tool.
+- **A second review pass:** an AI-assisted read of every package against what these docs claim
+  found 17 small issues, none affecting correctness. 13 were fixed in one commit: the burst tool
+  crashing with fewer than 41 columns and skipping its invariant poll on very short runs,
+  `deploy.sh` reporting success when the app never became ready, unbounded metric labels from
+  made-up HTTP methods, 413 for oversized bodies, fail-closed auth in handlers, bounded request
+  logging, config range checks, at most two concurrent public audits, a log follower no longer
+  delaying shutdown, and auditor errors made visible.
+- **What I directed and decided:**
+  - **The deploy platform.** I had an EC2 instance lying around that I had been using as the
+    coturn (TURN relay) server for my WebRTC chat project, so instead of paying for Railway, whose
+    trial had expired, I reused it for this deployment: it costs nothing extra, it sits in Mumbai
+    close to the users, and anyone can hit the public URL to check that the service is live.
+  - **Scope.** Confirming seats on reserve with an owner cancel, rather than timed holds, and
+    all-or-nothing multi-seat requests were Claude's proposals; I accepted them because the spec's
+    success response is `"status": "confirmed"` and there is no payment step. Timed holds are
+    designed in section 3 but not built.
+  - **Fix before submitting.** When the review pass found the 17 issues, I chose to fix the 13 cheap
+    ones before submitting rather than only documenting them.
+- **How I'm making sure the understanding is mine:** because Claude wrote most of the code, I'm
+  going through it part by part in plain language and practising explaining it back without notes:
+  where the atomic decision lives (section 1), why opposite-order multi-seat requests can't
+  deadlock, how a duplicate idempotency key waits on the unique index, and why the read-only
+  precheck is not a read-then-write. Extending the service live in the interview is the honest
+  test of that.
 
 ## 7. What I'd do next
 
